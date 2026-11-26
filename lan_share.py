@@ -56,6 +56,11 @@ import ssl
 import threading
 import time
 import uuid
+
+from core.protocol import read_json_header, validate_file_header
+from core.network.discovery import decode_discovery_packet, normalize_announcement
+from core.network.interfaces import get_local_ipv4
+from storage.paths import CERT_DIR, CONFIG_PATH, HISTORY_PATH, prepare_storage
 from datetime import datetime
 
 import tkinter as tk
@@ -78,9 +83,6 @@ CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"   # без похожих 0/O,
 CODE_LEN = 6              # длина кода комнаты
 MAX_JOIN_FAILS = 5        # попыток ввода кода до временной блокировки IP
 JOIN_BLOCK_SEC = 600      # длительность блокировки IP, сек
-CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".lan_share.json")
-HISTORY_PATH = os.path.join(os.path.expanduser("~"), ".lan_share_history.json")
-CERT_DIR = os.path.join(os.path.expanduser("~"), ".lan_share_tls")
 HISTORY_LIMIT = 500       # сколько записей истории хранить
 INBOX_MAX = 40            # всего ожидающих запросов в панели «Входящие»
 INBOX_PER_SENDER = 5      # ожидающих запросов от одного отправителя
@@ -159,15 +161,8 @@ C.apply("dark")
 
 
 def lan_ip():
-    """Собственный IP в локальной сети (или 127.0.0.1, если сети нет)."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("8.8.8.8", 80))
-        return s.getsockname()[0]
-    except OSError:
-        return "127.0.0.1"
-    finally:
-        s.close()
+    """Совместимый адаптер к модулю выбора локального IPv4."""
+    return get_local_ipv4()
 
 
 def _enable_dpi_awareness():
@@ -263,6 +258,7 @@ class App:
     # СБОРКА: состояние сессии + создание интерфейса
     # ===========================================================================
     def __init__(self):
+        prepare_storage()  # create user-data folders and migrate legacy files
         _enable_dpi_awareness()          # чёткий текст на Windows с масштабом 125–200 %
         self.root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
         self._k = max(1.0, self.root.winfo_fpixels("1i") / 96.0)   # масштаб экрана
@@ -292,6 +288,8 @@ class App:
         self.pending_code = None         # код комнаты, которую сейчас ищем по сети
         self.ui = queue.Queue()          # очередь событий для GUI
         self.lock = threading.RLock()
+        # Limit concurrent inbound sockets so connection floods cannot spawn unbounded threads.
+        self._connection_slots = threading.BoundedSemaphore(32)
         self.transfers = {}              # id -> активная передача (прогресс и отмена)
         self._tid = 0
         self.failed_joins = {}           # ip -> {"count", "until"} — защита от перебора кода
@@ -619,31 +617,23 @@ class App:
                 continue
             except OSError:
                 break
-            try:
-                p = json.loads(data.decode("utf-8"))
-            except (ValueError, UnicodeDecodeError):
-                continue
-            if not isinstance(p, dict):
+            p = decode_discovery_packet(data)
+            if p is None:
                 continue
             if p.get("type") == "query":
                 self._answer_query(p, addr)
                 continue
-            pid = p.get("id")
-            if not pid or not isinstance(pid, str):
-                continue          # чужой или битый пакет — поток не должен падать
+
+            peer = normalize_announcement(p, addr[0])
+            if peer is None:
+                continue
+            pid = peer["id"]
             if pid == self.my_id or not p.get("visible", True):
                 continue  # себя не показываем и «невидимок» не добавляем
-            try:
-                port = int(p.get("port") or 0)
-            except (TypeError, ValueError):
-                continue
+
+            peer["seen"] = time.time()
             with self.lock:
-                self.peers[pid] = {
-                    "id": pid, "host": str(p.get("host") or addr[0])[:64],
-                    "ip": addr[0], "port": port,
-                    "room": p.get("room", ""), "access": p.get("access", ""),
-                    "hidden": bool(p.get("hidden")), "seen": time.time(),
-                }
+                self.peers[pid] = peer
             self._ui("peers")
             self._maybe_join_pending(p)
 
@@ -687,8 +677,21 @@ class App:
                 conn, addr = self.tcp_sock.accept()
             except OSError:
                 break
-            threading.Thread(target=self._handle_conn, args=(conn, addr),
-                             daemon=True).start()
+            if not self._connection_slots.acquire(blocking=False):
+                self._reject(conn, "Слишком много одновременных подключений. Повторите позже.")
+                continue
+            try:
+                threading.Thread(target=self._handle_conn_guarded,
+                                 args=(conn, addr), daemon=True).start()
+            except RuntimeError:
+                self._connection_slots.release()
+                self._reject(conn, "Не удалось запустить обработчик подключения.")
+
+    def _handle_conn_guarded(self, conn, addr):
+        try:
+            self._handle_conn(conn, addr)
+        finally:
+            self._connection_slots.release()
 
     @staticmethod
     def _reject(conn, reason):
@@ -710,7 +713,13 @@ class App:
                 # Рукопожатие — в рабочем потоке, чтобы не блокировать accept-цикл
                 conn = self.ssl_srv.wrap_socket(conn, server_side=True)
             rf = conn.makefile("rb")
-            header = json.loads(rf.readline().decode("utf-8"))
+            header = read_json_header(rf)
+            if header.get("type") == "file":
+                try:
+                    validate_file_header(header)
+                except ValueError as exc:
+                    self._reject(conn, f"Некорректный запрос файла: {exc}")
+                    return
             if header.get("type") == "hello":
                 blocked = self.failed_joins.get(addr[0])
                 if blocked and blocked.get("until", 0) > time.time():
@@ -913,13 +922,17 @@ class App:
         return "/".join(parts) or "file.bin"
 
     def _recv_file(self, conn, rf, header):
+        try:
+            size = validate_file_header(header)
+        except ValueError as exc:
+            self._reject(conn, f"Некорректный запрос файла: {exc}")
+            return
         if int(header.get("ver") or 0) != PROTO_VER:
             self._reject(conn, "Версия протокола не совпадает — обновите LAN Share на обоих ПК")
             self._log("Отклонён файл от несовместимой версии программы")
             return
         name = os.path.basename(header.get("name", "file.bin"))
         rel = self._safe_rel(header.get("rel") or name)
-        size = max(0, int(header.get("size", 0)))
         sender = header.get("sender", "?")
         digest = str(header.get("sha256") or "")
         sid = "".join(c for c in str(header.get("sender_id") or "") if c.isalnum())[:12] or "anon"
