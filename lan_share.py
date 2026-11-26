@@ -56,6 +56,8 @@ import ssl
 import threading
 import time
 import uuid
+
+from core.protocol import read_json_header, validate_file_header
 from datetime import datetime
 
 import tkinter as tk
@@ -292,6 +294,8 @@ class App:
         self.pending_code = None         # код комнаты, которую сейчас ищем по сети
         self.ui = queue.Queue()          # очередь событий для GUI
         self.lock = threading.RLock()
+        # Limit concurrent inbound sockets so connection floods cannot spawn unbounded threads.
+        self._connection_slots = threading.BoundedSemaphore(32)
         self.transfers = {}              # id -> активная передача (прогресс и отмена)
         self._tid = 0
         self.failed_joins = {}           # ip -> {"count", "until"} — защита от перебора кода
@@ -687,8 +691,21 @@ class App:
                 conn, addr = self.tcp_sock.accept()
             except OSError:
                 break
-            threading.Thread(target=self._handle_conn, args=(conn, addr),
-                             daemon=True).start()
+            if not self._connection_slots.acquire(blocking=False):
+                self._reject(conn, "Слишком много одновременных подключений. Повторите позже.")
+                continue
+            try:
+                threading.Thread(target=self._handle_conn_guarded,
+                                 args=(conn, addr), daemon=True).start()
+            except RuntimeError:
+                self._connection_slots.release()
+                self._reject(conn, "Не удалось запустить обработчик подключения.")
+
+    def _handle_conn_guarded(self, conn, addr):
+        try:
+            self._handle_conn(conn, addr)
+        finally:
+            self._connection_slots.release()
 
     @staticmethod
     def _reject(conn, reason):
@@ -710,7 +727,13 @@ class App:
                 # Рукопожатие — в рабочем потоке, чтобы не блокировать accept-цикл
                 conn = self.ssl_srv.wrap_socket(conn, server_side=True)
             rf = conn.makefile("rb")
-            header = json.loads(rf.readline().decode("utf-8"))
+            header = read_json_header(rf)
+            if header.get("type") == "file":
+                try:
+                    validate_file_header(header)
+                except ValueError as exc:
+                    self._reject(conn, f"Некорректный запрос файла: {exc}")
+                    return
             if header.get("type") == "hello":
                 blocked = self.failed_joins.get(addr[0])
                 if blocked and blocked.get("until", 0) > time.time():
@@ -913,13 +936,17 @@ class App:
         return "/".join(parts) or "file.bin"
 
     def _recv_file(self, conn, rf, header):
+        try:
+            size = validate_file_header(header)
+        except ValueError as exc:
+            self._reject(conn, f"Некорректный запрос файла: {exc}")
+            return
         if int(header.get("ver") or 0) != PROTO_VER:
             self._reject(conn, "Версия протокола не совпадает — обновите LAN Share на обоих ПК")
             self._log("Отклонён файл от несовместимой версии программы")
             return
         name = os.path.basename(header.get("name", "file.bin"))
         rel = self._safe_rel(header.get("rel") or name)
-        size = max(0, int(header.get("size", 0)))
         sender = header.get("sender", "?")
         digest = str(header.get("sha256") or "")
         sid = "".join(c for c in str(header.get("sender_id") or "") if c.isalnum())[:12] or "anon"
