@@ -121,6 +121,7 @@ OPT_CHOICES = {"default_access": ("public", "code"), "on_conflict": ("rename", "
 
 from gui.theme import C
 from gui.scroll import ScrollFrame
+from gui.components import create_card
 
 def lan_ip():
     """Собственный IP в локальной сети (или 127.0.0.1, если сети нет)."""
@@ -1479,35 +1480,9 @@ class App:
     # --- 2.1.0a. Мелкие помощники виджетов -------------------------------
 
     def _card(self, parent, title=None, hint=None, pad=16):
-        """Карточка: рамка + заголовок. Возвращает (внешний фрейм, внутренний)."""
-        px = self.px
-        outer = tk.Frame(parent, bg=C.SURFACE, highlightthickness=1,
-                         highlightbackground=C.BORDER, highlightcolor=C.BORDER)
-        if title:
-            hdr = ttk.Frame(outer, style="Card.TFrame")
-            hdr.pack(fill="x", padx=px(pad), pady=(px(11), 0))
-            tl = ttk.Label(hdr, text=title, style="CardHead.TLabel")
-            tl.pack(side="left")
-            if hint:
-                hl = ttk.Label(hdr, text=hint, style="CardMuted.TLabel")
-                hl.pack(side="right")
-                shown = [True]
-
-                def fit_hint(e, tl=tl, hl=hl, shown=shown):
-                    # подсказка прячется, если в узкой карточке не хватает места
-                    need = tl.winfo_reqwidth() + hl.winfo_reqwidth() + px(2 * pad + 24)
-                    want = e.width >= need
-                    if want != shown[0]:
-                        shown[0] = want
-                        if want:
-                            hl.pack(side="right")
-                        else:
-                            hl.pack_forget()
-                outer.bind("<Configure>", fit_hint, add="+")
-        inner = ttk.Frame(outer, style="Card.TFrame")
-        inner.pack(fill="both", expand=True, padx=px(pad),
-                   pady=(px(8) if title else px(pad - 2), px(pad - 2)))
-        return outer, inner
+        """Создать стандартную карточку интерфейса через общий компонент."""
+        return create_card(parent, theme=C, scale=self.px,
+                           title=title, hint=hint, pad=pad)
 
     def _menu(self):
         return tk.Menu(self.root, tearoff=0, bg=C.SURFACE2, fg=C.TEXT,
