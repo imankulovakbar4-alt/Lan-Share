@@ -58,6 +58,7 @@ import time
 import uuid
 
 from core.protocol import read_json_header, validate_file_header
+from storage.paths import CERT_DIR, CONFIG_PATH, HISTORY_PATH, prepare_storage
 from datetime import datetime
 
 import tkinter as tk
@@ -80,9 +81,6 @@ CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"   # без похожих 0/O,
 CODE_LEN = 6              # длина кода комнаты
 MAX_JOIN_FAILS = 5        # попыток ввода кода до временной блокировки IP
 JOIN_BLOCK_SEC = 600      # длительность блокировки IP, сек
-CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".lan_share.json")
-HISTORY_PATH = os.path.join(os.path.expanduser("~"), ".lan_share_history.json")
-CERT_DIR = os.path.join(os.path.expanduser("~"), ".lan_share_tls")
 HISTORY_LIMIT = 500       # сколько записей истории хранить
 INBOX_MAX = 40            # всего ожидающих запросов в панели «Входящие»
 INBOX_PER_SENDER = 5      # ожидающих запросов от одного отправителя
@@ -265,6 +263,7 @@ class App:
     # СБОРКА: состояние сессии + создание интерфейса
     # ===========================================================================
     def __init__(self):
+        prepare_storage()  # create user-data folders and migrate legacy files
         _enable_dpi_awareness()          # чёткий текст на Windows с масштабом 125–200 %
         self.root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
         self._k = max(1.0, self.root.winfo_fpixels("1i") / 96.0)   # масштаб экрана
