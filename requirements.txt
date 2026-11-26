@@ -1,0 +1,4 @@
+# Runtime dependencies for the Windows desktop application.
+# Tkinter itself is supplied by the selected Python installation.
+cryptography>=42.0
+tkinterdnd2>=0.4.2

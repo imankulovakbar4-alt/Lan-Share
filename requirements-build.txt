@@ -1,0 +1,2 @@
+# Build tooling. Install together with requirements.txt.
+pyinstaller>=6.10,<7

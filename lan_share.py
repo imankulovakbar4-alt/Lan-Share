@@ -58,6 +58,9 @@ import time
 import uuid
 
 from core.protocol import read_json_header, validate_file_header
+from core.network.discovery import decode_discovery_packet, normalize_announcement
+from core.network.interfaces import get_local_ipv4
+from storage.paths import CERT_DIR, CONFIG_PATH, HISTORY_PATH, prepare_storage
 from datetime import datetime
 
 import tkinter as tk
@@ -80,9 +83,6 @@ CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"   # без похожих 0/O,
 CODE_LEN = 6              # длина кода комнаты
 MAX_JOIN_FAILS = 5        # попыток ввода кода до временной блокировки IP
 JOIN_BLOCK_SEC = 600      # длительность блокировки IP, сек
-CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".lan_share.json")
-HISTORY_PATH = os.path.join(os.path.expanduser("~"), ".lan_share_history.json")
-CERT_DIR = os.path.join(os.path.expanduser("~"), ".lan_share_tls")
 HISTORY_LIMIT = 500       # сколько записей истории хранить
 INBOX_MAX = 40            # всего ожидающих запросов в панели «Входящие»
 INBOX_PER_SENDER = 5      # ожидающих запросов от одного отправителя
@@ -161,15 +161,8 @@ C.apply("dark")
 
 
 def lan_ip():
-    """Собственный IP в локальной сети (или 127.0.0.1, если сети нет)."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("8.8.8.8", 80))
-        return s.getsockname()[0]
-    except OSError:
-        return "127.0.0.1"
-    finally:
-        s.close()
+    """Совместимый адаптер к модулю выбора локального IPv4."""
+    return get_local_ipv4()
 
 
 def _enable_dpi_awareness():
@@ -265,6 +258,7 @@ class App:
     # СБОРКА: состояние сессии + создание интерфейса
     # ===========================================================================
     def __init__(self):
+        prepare_storage()  # create user-data folders and migrate legacy files
         _enable_dpi_awareness()          # чёткий текст на Windows с масштабом 125–200 %
         self.root = TkinterDnD.Tk() if HAS_DND else tk.Tk()
         self._k = max(1.0, self.root.winfo_fpixels("1i") / 96.0)   # масштаб экрана
@@ -623,31 +617,23 @@ class App:
                 continue
             except OSError:
                 break
-            try:
-                p = json.loads(data.decode("utf-8"))
-            except (ValueError, UnicodeDecodeError):
-                continue
-            if not isinstance(p, dict):
+            p = decode_discovery_packet(data)
+            if p is None:
                 continue
             if p.get("type") == "query":
                 self._answer_query(p, addr)
                 continue
-            pid = p.get("id")
-            if not pid or not isinstance(pid, str):
-                continue          # чужой или битый пакет — поток не должен падать
+
+            peer = normalize_announcement(p, addr[0])
+            if peer is None:
+                continue
+            pid = peer["id"]
             if pid == self.my_id or not p.get("visible", True):
                 continue  # себя не показываем и «невидимок» не добавляем
-            try:
-                port = int(p.get("port") or 0)
-            except (TypeError, ValueError):
-                continue
+
+            peer["seen"] = time.time()
             with self.lock:
-                self.peers[pid] = {
-                    "id": pid, "host": str(p.get("host") or addr[0])[:64],
-                    "ip": addr[0], "port": port,
-                    "room": p.get("room", ""), "access": p.get("access", ""),
-                    "hidden": bool(p.get("hidden")), "seen": time.time(),
-                }
+                self.peers[pid] = peer
             self._ui("peers")
             self._maybe_join_pending(p)
 
