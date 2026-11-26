@@ -27,8 +27,9 @@ def _usable_ipv4(value: str) -> bool:
 
 
 def _route_probe() -> str | None:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock = None
     try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.settimeout(0.5)
         # UDP connect does not establish a connection or transmit a packet.
         sock.connect(("8.8.8.8", 80))
@@ -37,7 +38,11 @@ def _route_probe() -> str | None:
     except OSError:
         return None
     finally:
-        sock.close()
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
 
 
 def _psutil_addresses() -> list[str]:
