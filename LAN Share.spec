@@ -1,15 +1,20 @@
 # -*- mode: python ; coding: utf-8 -*-
+"""PyInstaller configuration for the LAN Share Windows executable."""
+
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('lan_share.ico', '.')]
+datas = [("lan_share.ico", ".")]
 binaries = []
 hiddenimports = []
-tmp_ret = collect_all('tkinterdnd2')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
+# tkinterdnd2 loads Tcl/Tk extension files dynamically.
+dnd_datas, dnd_binaries, dnd_hiddenimports = collect_all("tkinterdnd2")
+datas += dnd_datas
+binaries += dnd_binaries
+hiddenimports += dnd_hiddenimports
 
 a = Analysis(
-    ['lan_share.py'],
+    ["main.py"],
     pathex=[],
     binaries=binaries,
     datas=datas,
@@ -21,6 +26,7 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -29,7 +35,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='LAN Share',
+    name="LAN Share",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -42,5 +48,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['lan_share.ico'],
+    icon=["lan_share.ico"],
 )
